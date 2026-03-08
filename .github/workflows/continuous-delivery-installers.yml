@@ -172,7 +172,12 @@ jobs:
           }
 
           $nextTag = "v$major.$minor.$patch"
-          $existingTag = (git tag -l $nextTag | Select-Object -First 1).Trim()
+          $existingTag = git tag -l $nextTag | Select-Object -First 1
+          if ($null -ne $existingTag) {
+            $existingTag = $existingTag.Trim()
+          } else {
+            $existingTag = ""
+          }
           if (-not [string]::IsNullOrWhiteSpace($existingTag)) {
             throw "Tag already exists: $nextTag"
           }
