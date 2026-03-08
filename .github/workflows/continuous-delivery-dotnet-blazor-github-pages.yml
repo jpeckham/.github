@@ -40,6 +40,11 @@ on:
         required: false
         type: string
         default: .github/badges/coverage.svg
+      coverage_pages_subpath:
+        description: Optional subpath under wwwroot to publish coverage HTML (for example, coverage)
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -145,6 +150,23 @@ jobs:
 
       - name: Publish Client
         run: dotnet publish "${{ inputs.publish_project_path }}" -c Release -o "${{ inputs.publish_output_dir }}"
+
+      - name: Download coverage report artifact
+        if: inputs.coverage_pages_subpath != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coveragereport
+
+      - name: Add coverage report to site output
+        if: inputs.coverage_pages_subpath != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          subpath="${{ inputs.coverage_pages_subpath }}"
+          site_dir="${{ inputs.publish_output_dir }}/wwwroot/${subpath}"
+          mkdir -p "${site_dir}"
+          cp -R coveragereport/. "${site_dir}/"
 
       - name: Configure GitHub Pages Base Path
         shell: pwsh
