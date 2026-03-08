@@ -100,7 +100,8 @@ jobs:
           workflow_url = f"https://github.com/{repo}/actions/workflows/{workflow_file}"
           workflow_badge = f"[![Continuous Delivery]({workflow_url}/badge.svg)]({workflow_url})"
           coverage_img = coverage_badge_path
-          target_url = coverage_link_url if coverage_link_url else workflow_url
+          default_coverage_url = f"https://github.com/{repo}/releases/latest/download/coverage-report.zip"
+          target_url = coverage_link_url if coverage_link_url else default_coverage_url
           coverage_badge = f"[![Coverage]({coverage_img})]({target_url})"
 
           managed_lines = [

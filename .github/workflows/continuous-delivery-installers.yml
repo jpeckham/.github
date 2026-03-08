@@ -220,6 +220,15 @@ jobs:
             Compress-Archive -Path "$outputDir/*" -DestinationPath $archivePath
           }
 
+      - name: Package coverage report for release
+        shell: pwsh
+        run: |
+          $coverageArchive = "dist/coverage-report.zip"
+          if (Test-Path $coverageArchive) {
+            Remove-Item -Force $coverageArchive
+          }
+          Compress-Archive -Path "coveragereport/*" -DestinationPath $coverageArchive
+
       - name: Create and push release tag
         shell: bash
         run: |

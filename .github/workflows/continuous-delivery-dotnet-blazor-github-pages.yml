@@ -45,6 +45,11 @@ on:
         required: false
         type: string
         default: ""
+      repository_private:
+        description: Whether the caller repository is private
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -136,7 +141,7 @@ jobs:
           path: coveragereport
 
   publish-pages:
-    if: needs.quality.result == 'success' && github.ref == format('refs/heads/{0}', inputs.main_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: needs.quality.result == 'success' && !inputs.repository_private && github.ref == format('refs/heads/{0}', inputs.main_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: quality
     runs-on: ubuntu-latest
     steps:
@@ -152,14 +157,14 @@ jobs:
         run: dotnet publish "${{ inputs.publish_project_path }}" -c Release -o "${{ inputs.publish_output_dir }}"
 
       - name: Download coverage report artifact
-        if: inputs.coverage_pages_subpath != ''
+        if: inputs.coverage_pages_subpath != '' && !inputs.repository_private
         uses: actions/download-artifact@v4
         with:
           name: coverage-report
           path: coveragereport
 
       - name: Add coverage report to site output
-        if: inputs.coverage_pages_subpath != ''
+        if: inputs.coverage_pages_subpath != '' && !inputs.repository_private
         shell: bash
         run: |
           set -euo pipefail
@@ -203,8 +208,8 @@ jobs:
         uses: actions/deploy-pages@v4
 
   release:
-    if: needs.deploy-pages.result == 'success' && github.ref == format('refs/heads/{0}', inputs.main_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: deploy-pages
+    if: github.ref == format('refs/heads/{0}', inputs.main_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && ((inputs.repository_private && needs.quality.result == 'success') || (!inputs.repository_private && needs.deploy-pages.result == 'success'))
+    needs: [quality, deploy-pages]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -259,6 +264,20 @@ jobs:
           git tag "${next_tag}"
           git push origin "${next_tag}"
 
+      - name: Download coverage report artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coveragereport
+
+      - name: Package coverage report for release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cd coveragereport
+          zip -r ../release-assets/coverage-report.zip .
+
       - name: Generate Release Notes
         shell: bash
         run: |
@@ -292,4 +311,4 @@ jobs:
         run: |
           set -euo pipefail
           next_tag="${{ steps.semver.outputs.next_tag }}"
-          gh release create "${next_tag}" --title "${next_tag}" --notes-file release-notes.md
+          gh release create "${next_tag}" --title "${next_tag}" --notes-file release-notes.md release-assets/coverage-report.zip
