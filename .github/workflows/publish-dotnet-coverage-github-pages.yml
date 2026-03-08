@@ -1,0 +1,151 @@
+name: Publish .NET Coverage to GitHub Pages Reusable
+
+on:
+  workflow_call:
+    inputs:
+      main_branch:
+        description: Main branch name
+        required: false
+        type: string
+        default: main
+      dotnet_version:
+        description: .NET SDK version
+        required: false
+        type: string
+        default: 10.0.x
+      solution_path:
+        description: Path to solution file for restore
+        required: false
+        type: string
+        default: ""
+      test_project_path:
+        description: Path to test project file
+        required: true
+        type: string
+      coverage_badge_path:
+        description: Path to write the coverage badge svg
+        required: false
+        type: string
+        default: .github/badges/coverage.svg
+      coverage_subpath:
+        description: Subpath under Pages root where coverage HTML is hosted
+        required: false
+        type: string
+        default: coverage
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: coverage-pages-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  publish-coverage-pages:
+    if: github.ref == format('refs/heads/{0}', inputs.main_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Restore
+        if: inputs.solution_path != ''
+        run: dotnet restore "${{ inputs.solution_path }}"
+
+      - name: Test with coverage
+        run: |
+          dotnet test "${{ inputs.test_project_path }}" \
+            --configuration Release \
+            --collect:"XPlat Code Coverage" \
+            --results-directory TestResults
+
+      - name: Install report generator
+        run: dotnet tool install -g dotnet-reportgenerator-globaltool
+
+      - name: Generate coverage report and badge
+        run: |
+          reportgenerator \
+            "-reports:TestResults/**/coverage.cobertura.xml" \
+            "-targetdir:coveragereport" \
+            "-reporttypes:Html;MarkdownSummaryGithub;Badges"
+
+      - name: Publish coverage summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f coveragereport/SummaryGithub.md ]; then
+            cat coveragereport/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -f coveragereport/Summary.md ]; then
+            cat coveragereport/Summary.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Coverage summary file not found." >&2
+          exit 1
+
+      - name: Update coverage badge file
+        shell: bash
+        run: |
+          set -euo pipefail
+          badge_path="${{ inputs.coverage_badge_path }}"
+          mkdir -p "$(dirname "${badge_path}")"
+          cp coveragereport/badge_linecoverage.svg "${badge_path}"
+
+      - name: Commit coverage badge
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          badge_path="${{ inputs.coverage_badge_path }}"
+          if git diff --quiet -- "${badge_path}"; then
+            echo "No badge changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${badge_path}"
+          git commit -m "chore: update coverage badge [skip ci]"
+          git push
+
+      - name: Build Pages payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          subpath="${{ inputs.coverage_subpath }}"
+          mkdir -p "pages-site/${subpath}"
+          cp -R coveragereport/. "pages-site/${subpath}/"
+          cat > pages-site/index.html <<EOF
+          <!doctype html>
+          <html>
+          <head>
+            <meta charset="utf-8" />
+            <meta http-equiv="refresh" content="0; url=./${subpath}/" />
+            <title>Coverage Report</title>
+          </head>
+          <body>
+            <p>Redirecting to coverage report...</p>
+          </body>
+          </html>
+          EOF
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

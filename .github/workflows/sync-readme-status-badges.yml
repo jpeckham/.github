@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: .github/badges/coverage.svg
+      coverage_link_url:
+        description: URL opened when clicking the coverage badge (defaults to workflow URL)
+        required: false
+        type: string
+        default: ""
       include_coverage_badge:
         description: Whether to include a coverage badge line in the managed block
         required: false
@@ -67,6 +72,7 @@ jobs:
           START_MARKER: ${{ inputs.start_marker }}
           END_MARKER: ${{ inputs.end_marker }}
           COVERAGE_BADGE_PATH: ${{ inputs.coverage_badge_path }}
+          COVERAGE_LINK_URL: ${{ inputs.coverage_link_url }}
           INCLUDE_COVERAGE_BADGE: ${{ inputs.include_coverage_badge }}
           MAIN_BRANCH: ${{ inputs.main_branch }}
         shell: bash
@@ -84,6 +90,7 @@ jobs:
           start_marker = os.environ['START_MARKER']
           end_marker = os.environ['END_MARKER']
           coverage_badge_path = os.environ['COVERAGE_BADGE_PATH']
+          coverage_link_url = os.environ.get('COVERAGE_LINK_URL', '')
           include_coverage_badge = os.environ.get('INCLUDE_COVERAGE_BADGE', 'true').lower() == 'true'
           main_branch = os.environ['MAIN_BRANCH']
 
@@ -93,7 +100,8 @@ jobs:
           workflow_url = f"https://github.com/{repo}/actions/workflows/{workflow_file}"
           workflow_badge = f"[![Continuous Delivery]({workflow_url}/badge.svg)]({workflow_url})"
           coverage_img = coverage_badge_path
-          coverage_badge = f"[![Coverage]({coverage_img})]({workflow_url})"
+          target_url = coverage_link_url if coverage_link_url else workflow_url
+          coverage_badge = f"[![Coverage]({coverage_img})]({target_url})"
 
           managed_lines = [
             start_marker,
