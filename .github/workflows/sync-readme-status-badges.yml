@@ -92,7 +92,7 @@ jobs:
 
           workflow_url = f"https://github.com/{repo}/actions/workflows/{workflow_file}"
           workflow_badge = f"[![Continuous Delivery]({workflow_url}/badge.svg)]({workflow_url})"
-          coverage_img = f"https://raw.githubusercontent.com/{repo}/{main_branch}/{coverage_badge_path}"
+          coverage_img = coverage_badge_path
           coverage_badge = f"[![Coverage]({coverage_img})]({workflow_url})"
 
           managed_lines = [
