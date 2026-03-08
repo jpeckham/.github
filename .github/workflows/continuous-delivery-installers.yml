@@ -172,8 +172,8 @@ jobs:
           }
 
           $nextTag = "v$major.$minor.$patch"
-          git rev-parse $nextTag *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $existingTag = (git tag -l $nextTag | Select-Object -First 1).Trim()
+          if (-not [string]::IsNullOrWhiteSpace($existingTag)) {
             throw "Tag already exists: $nextTag"
           }
 
