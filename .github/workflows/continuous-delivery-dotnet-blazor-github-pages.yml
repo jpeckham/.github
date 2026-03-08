@@ -1,0 +1,273 @@
+name: Continuous Delivery Reusable
+
+on:
+  workflow_call:
+    inputs:
+      main_branch:
+        description: Main branch name
+        required: false
+        type: string
+        default: main
+      dotnet_version:
+        description: .NET SDK version
+        required: false
+        type: string
+        default: 10.0.x
+      solution_path:
+        description: Path to solution file
+        required: true
+        type: string
+      test_project_path:
+        description: Path to test project file
+        required: true
+        type: string
+      publish_project_path:
+        description: Path to publishable project file
+        required: true
+        type: string
+      publish_output_dir:
+        description: Output directory for dotnet publish
+        required: false
+        type: string
+        default: publish
+      version_file:
+        description: Path to version json file
+        required: false
+        type: string
+        default: version.json
+      coverage_badge_path:
+        description: Path to write the coverage badge svg
+        required: false
+        type: string
+        default: .github/badges/coverage.svg
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Restore
+        run: dotnet restore "${{ inputs.solution_path }}"
+
+      - name: Test with coverage
+        run: |
+          dotnet test "${{ inputs.test_project_path }}" \
+            --configuration Release \
+            --collect:"XPlat Code Coverage" \
+            --results-directory TestResults
+
+      - name: Install report generator
+        run: dotnet tool install -g dotnet-reportgenerator-globaltool
+
+      - name: Generate coverage report and badge
+        run: |
+          ls -R TestResults
+          reportgenerator \
+            "-reports:TestResults/**/coverage.cobertura.xml" \
+            "-targetdir:coveragereport" \
+            "-reporttypes:Html;MarkdownSummaryGithub;Badges"
+
+      - name: Publish coverage summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f coveragereport/SummaryGithub.md ]; then
+            cat coveragereport/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -f coveragereport/Summary.md ]; then
+            cat coveragereport/Summary.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Coverage summary file not found. Generated files:" >&2
+          find coveragereport -maxdepth 2 -type f | sort >&2
+          exit 1
+
+      - name: Update coverage badge file
+        shell: bash
+        run: |
+          set -euo pipefail
+          badge_path="${{ inputs.coverage_badge_path }}"
+          mkdir -p "$(dirname "${badge_path}")"
+          cp coveragereport/badge_linecoverage.svg "${badge_path}"
+
+      - name: Commit coverage badge (main only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', inputs.main_branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          badge_path="${{ inputs.coverage_badge_path }}"
+          if git diff --quiet -- "${badge_path}"; then
+            echo "No badge changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${badge_path}"
+          git commit -m "chore: update coverage badge [skip ci]"
+          git push
+
+      - name: Upload coverage report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coveragereport
+
+  publish-pages:
+    if: needs.quality.result == 'success' && github.ref == format('refs/heads/{0}', inputs.main_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Publish Client
+        run: dotnet publish "${{ inputs.publish_project_path }}" -c Release -o "${{ inputs.publish_output_dir }}"
+
+      - name: Configure GitHub Pages Base Path
+        shell: pwsh
+        run: |
+          $site = Join-Path $PWD '${{ inputs.publish_output_dir }}/wwwroot'
+          $repo = '${{ github.event.repository.name }}'
+          $index = Join-Path $site 'index.html'
+          $content = Get-Content $index -Raw
+          $baseHref = '<base href="/{0}/" />' -f $repo
+          $content = $content -replace '<base href="/" />', $baseHref
+          Set-Content $index $content
+          Copy-Item $index (Join-Path $site '404.html') -Force
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ inputs.publish_output_dir }}/wwwroot
+
+  deploy-pages:
+    if: needs.publish-pages.result == 'success'
+    needs: publish-pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  release:
+    if: needs.deploy-pages.result == 'success' && github.ref == format('refs/heads/{0}', inputs.main_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: deploy-pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute Next SemVer Tag
+        id: semver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "${{ inputs.version_file }}" ]; then
+            echo "${{ inputs.version_file }} is missing" >&2
+            exit 1
+          fi
+
+          major=$(jq -r '.major // empty' "${{ inputs.version_file }}")
+          minor=$(jq -r '.minor // empty' "${{ inputs.version_file }}")
+          if [ -z "${major}" ] || [ -z "${minor}" ]; then
+            echo "${{ inputs.version_file }} must contain major and minor integers" >&2
+            exit 1
+          fi
+
+          git fetch --tags --force
+          latest=$(git tag -l "v${major}.${minor}.*" --sort=-v:refname | head -n 1 || true)
+          if [ -z "${latest}" ]; then
+            patch=0
+            previous=""
+          else
+            patch=$(( ${latest##*.} + 1 ))
+            previous="${latest}"
+          fi
+
+          next_tag="v${major}.${minor}.${patch}"
+          if git rev-parse "${next_tag}" >/dev/null 2>&1; then
+            echo "Tag already exists: ${next_tag}" >&2
+            exit 1
+          fi
+
+          echo "next_tag=${next_tag}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${previous}" >> "$GITHUB_OUTPUT"
+          echo "Computed next version: ${next_tag}"
+
+      - name: Create and Push Tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${next_tag}"
+          git push origin "${next_tag}"
+
+      - name: Generate Release Notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="${{ steps.semver.outputs.previous_tag }}"
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          {
+            echo "## ${next_tag}"
+            echo
+            echo "### Changes"
+          } > release-notes.md
+
+          if [ -n "${previous}" ]; then
+            git log --pretty=format:'- %h %s' "${previous}..HEAD" >> release-notes.md
+            echo >> release-notes.md
+            echo >> release-notes.md
+            echo "Compare: ${previous}...${next_tag}" >> release-notes.md
+          else
+            git log --pretty=format:'- %h %s' HEAD >> release-notes.md
+          fi
+
+          if [ ! -s release-notes.md ]; then
+            echo "Release notes generation failed: empty notes file" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          gh release create "${next_tag}" --title "${next_tag}" --notes-file release-notes.md

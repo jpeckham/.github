@@ -1,0 +1,140 @@
+name: Sync README Status Badges
+
+on:
+  workflow_call:
+    inputs:
+      workflow_file:
+        description: Workflow file name used for the CI/CD badge URL
+        required: true
+        type: string
+      readme_path:
+        description: Path to README file to update
+        required: false
+        type: string
+        default: README.md
+      section_header:
+        description: Badge section header text
+        required: false
+        type: string
+        default: Status Badges
+      start_marker:
+        description: Start marker for managed badge block
+        required: false
+        type: string
+        default: '<!-- badges:start -->'
+      end_marker:
+        description: End marker for managed badge block
+        required: false
+        type: string
+        default: '<!-- badges:end -->'
+      coverage_badge_path:
+        description: Path to the committed coverage badge asset
+        required: false
+        type: string
+        default: .github/badges/coverage.svg
+      main_branch:
+        description: Branch used for raw coverage badge URL
+        required: false
+        type: string
+        default: main
+      commit_message:
+        description: Commit message used when README is updated
+        required: false
+        type: string
+        default: 'docs(readme): sync status badges [skip ci]'
+
+permissions:
+  contents: write
+
+jobs:
+  sync-badges:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+
+      - name: Update managed badge block
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_FILE: ${{ inputs.workflow_file }}
+          README_PATH: ${{ inputs.readme_path }}
+          SECTION_HEADER: ${{ inputs.section_header }}
+          START_MARKER: ${{ inputs.start_marker }}
+          END_MARKER: ${{ inputs.end_marker }}
+          COVERAGE_BADGE_PATH: ${{ inputs.coverage_badge_path }}
+          MAIN_BRANCH: ${{ inputs.main_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          workflow_file = os.environ['WORKFLOW_FILE']
+          readme_path = Path(os.environ['README_PATH'])
+          section_header = os.environ['SECTION_HEADER']
+          start_marker = os.environ['START_MARKER']
+          end_marker = os.environ['END_MARKER']
+          coverage_badge_path = os.environ['COVERAGE_BADGE_PATH']
+          main_branch = os.environ['MAIN_BRANCH']
+
+          if not readme_path.exists():
+            raise SystemExit(f"README path does not exist: {readme_path}")
+
+          workflow_url = f"https://github.com/{repo}/actions/workflows/{workflow_file}"
+          workflow_badge = f"[![Continuous Delivery]({workflow_url}/badge.svg)]({workflow_url})"
+          coverage_img = f"https://raw.githubusercontent.com/{repo}/{main_branch}/{coverage_badge_path}"
+          coverage_badge = f"[![Coverage]({coverage_img})]({workflow_url})"
+
+          managed_block = "\n".join([
+            start_marker,
+            f"## {section_header}",
+            "",
+            workflow_badge,
+            coverage_badge,
+            end_marker,
+          ])
+
+          original = readme_path.read_text(encoding='utf-8')
+          content = original
+
+          if start_marker in content and end_marker in content:
+            pattern = re.compile(re.escape(start_marker) + r".*?" + re.escape(end_marker), re.DOTALL)
+            content = pattern.sub(managed_block, content, count=1)
+          else:
+            lines = content.splitlines()
+            insert_at = 0
+            if lines and lines[0].startswith('# '):
+              insert_at = 1
+              while insert_at < len(lines) and lines[insert_at].strip() == "":
+                insert_at += 1
+
+            block_lines = ["", managed_block, ""]
+            lines[insert_at:insert_at] = block_lines
+            content = "\n".join(lines)
+
+          if content != original:
+            readme_path.write_text(content.rstrip() + "\n", encoding='utf-8')
+            print(f"Updated {readme_path}")
+          else:
+            print(f"No changes to {readme_path}")
+          PY
+
+      - name: Commit and push README update
+        env:
+          README_PATH: ${{ inputs.readme_path }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- "$README_PATH"; then
+            echo "No README changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$README_PATH"
+          git commit -m "$COMMIT_MESSAGE"
+          git push
