@@ -20,11 +20,7 @@ on:
         required: true
         type: string
       test_target_path:
-        description: Path to test target (solution or project)
-        required: true
-        type: string
-      test_project_path:
-        description: Path to test project file used for coverage collection
+        description: Path to test target (solution or project) used for test and coverage
         required: true
         type: string
       publish_project_path:
@@ -73,13 +69,12 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore "${{ inputs.solution_path }}"
 
-      - name: Run test suite
-        run: dotnet test "${{ inputs.test_target_path }}" --no-restore -v minimal
-
-      - name: Test with coverage
+      - name: Run tests with coverage
         run: |
-          dotnet test "${{ inputs.test_project_path }}" `
+          dotnet test "${{ inputs.test_target_path }}" `
+            --no-restore `
             --configuration Release `
+            -v minimal `
             --collect:"XPlat Code Coverage" `
             --results-directory TestResults
 
