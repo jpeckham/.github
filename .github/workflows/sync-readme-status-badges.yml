@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: .github/badges/coverage.svg
+      include_coverage_badge:
+        description: Whether to include a coverage badge line in the managed block
+        required: false
+        type: boolean
+        default: true
       main_branch:
         description: Branch used for raw coverage badge URL
         required: false
@@ -62,6 +67,7 @@ jobs:
           START_MARKER: ${{ inputs.start_marker }}
           END_MARKER: ${{ inputs.end_marker }}
           COVERAGE_BADGE_PATH: ${{ inputs.coverage_badge_path }}
+          INCLUDE_COVERAGE_BADGE: ${{ inputs.include_coverage_badge }}
           MAIN_BRANCH: ${{ inputs.main_branch }}
         shell: bash
         run: |
@@ -78,6 +84,7 @@ jobs:
           start_marker = os.environ['START_MARKER']
           end_marker = os.environ['END_MARKER']
           coverage_badge_path = os.environ['COVERAGE_BADGE_PATH']
+          include_coverage_badge = os.environ.get('INCLUDE_COVERAGE_BADGE', 'true').lower() == 'true'
           main_branch = os.environ['MAIN_BRANCH']
 
           if not readme_path.exists():
@@ -88,14 +95,16 @@ jobs:
           coverage_img = f"https://raw.githubusercontent.com/{repo}/{main_branch}/{coverage_badge_path}"
           coverage_badge = f"[![Coverage]({coverage_img})]({workflow_url})"
 
-          managed_block = "\n".join([
+          managed_lines = [
             start_marker,
             f"## {section_header}",
             "",
             workflow_badge,
-            coverage_badge,
-            end_marker,
-          ])
+          ]
+          if include_coverage_badge:
+            managed_lines.append(coverage_badge)
+          managed_lines.append(end_marker)
+          managed_block = "\n".join(managed_lines)
 
           original = readme_path.read_text(encoding='utf-8')
           content = original

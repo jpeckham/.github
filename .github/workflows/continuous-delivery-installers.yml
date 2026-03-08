@@ -1,0 +1,267 @@
+name: Continuous Delivery Installers Reusable
+
+on:
+  workflow_call:
+    inputs:
+      main_branch:
+        description: Main branch name
+        required: false
+        type: string
+        default: main
+      dotnet_versions:
+        description: .NET SDK versions to install (newline-separated)
+        required: false
+        type: string
+        default: |
+          8.0.x
+          10.0.x
+      solution_path:
+        description: Path to solution file
+        required: true
+        type: string
+      test_target_path:
+        description: Path to test target (solution or project)
+        required: true
+        type: string
+      test_project_path:
+        description: Path to test project file used for coverage collection
+        required: true
+        type: string
+      publish_project_path:
+        description: Path to publishable project file
+        required: true
+        type: string
+      version_file:
+        description: Path to version json file
+        required: false
+        type: string
+        default: version.json
+      artifact_name_prefix:
+        description: Prefix for generated installer zip files
+        required: true
+        type: string
+      runtimes:
+        description: Comma-separated runtime identifiers
+        required: false
+        type: string
+        default: win-x64,win-arm64
+      coverage_badge_path:
+        description: Path to write the coverage badge svg
+        required: false
+        type: string
+        default: .github/badges/coverage.svg
+
+permissions:
+  contents: write
+
+jobs:
+  release-installers:
+    if: github.ref == format('refs/heads/{0}', inputs.main_branch)
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_versions }}
+
+      - name: Restore dependencies
+        run: dotnet restore "${{ inputs.solution_path }}"
+
+      - name: Run test suite
+        run: dotnet test "${{ inputs.test_target_path }}" --no-restore -v minimal
+
+      - name: Test with coverage
+        run: |
+          dotnet test "${{ inputs.test_project_path }}" `
+            --configuration Release `
+            --collect:"XPlat Code Coverage" `
+            --results-directory TestResults
+
+      - name: Install report generator
+        run: dotnet tool install -g dotnet-reportgenerator-globaltool
+
+      - name: Generate coverage report and badge
+        shell: bash
+        run: |
+          set -euo pipefail
+          reportgenerator \
+            "-reports:TestResults/**/coverage.cobertura.xml" \
+            "-targetdir:coveragereport" \
+            "-reporttypes:Html;MarkdownSummaryGithub;Badges"
+
+      - name: Publish coverage summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f coveragereport/SummaryGithub.md ]; then
+            cat coveragereport/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -f coveragereport/Summary.md ]; then
+            cat coveragereport/Summary.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Coverage summary file not found. Generated files:" >&2
+          find coveragereport -maxdepth 2 -type f | sort >&2
+          exit 1
+
+      - name: Update coverage badge file
+        shell: bash
+        run: |
+          set -euo pipefail
+          badge_path="${{ inputs.coverage_badge_path }}"
+          mkdir -p "$(dirname "${badge_path}")"
+          cp coveragereport/badge_linecoverage.svg "${badge_path}"
+
+      - name: Commit coverage badge (main only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', inputs.main_branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          badge_path="${{ inputs.coverage_badge_path }}"
+          if git diff --quiet -- "${badge_path}"; then
+            echo "No badge changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${badge_path}"
+          git commit -m "chore: update coverage badge [skip ci]"
+          git push
+
+      - name: Upload coverage report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coveragereport
+
+      - name: Compute next SemVer tag
+        id: semver
+        shell: pwsh
+        run: |
+          $versionFile = "${{ inputs.version_file }}"
+          if (-not (Test-Path $versionFile)) {
+            throw "Version file not found: $versionFile"
+          }
+
+          $versionJson = Get-Content $versionFile -Raw | ConvertFrom-Json
+          $major = $versionJson.major
+          $minor = $versionJson.minor
+          if ($null -eq $major -or $null -eq $minor) {
+            throw "Version file must include integer fields 'major' and 'minor'."
+          }
+
+          git fetch --tags --force
+
+          $latest = git tag -l "v$major.$minor.*" --sort=-v:refname | Select-Object -First 1
+          $previousTag = ""
+          $patch = 0
+          if (-not [string]::IsNullOrWhiteSpace($latest)) {
+            $previousTag = $latest
+            $parts = $latest.TrimStart('v').Split('.')
+            if ($parts.Count -lt 3) {
+              throw "Latest tag '$latest' is not in expected v<major>.<minor>.<patch> format."
+            }
+            $patch = [int]$parts[2] + 1
+          }
+
+          $nextTag = "v$major.$minor.$patch"
+          git rev-parse $nextTag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Tag already exists: $nextTag"
+          }
+
+          "next_tag=$nextTag" >> $env:GITHUB_OUTPUT
+          "previous_tag=$previousTag" >> $env:GITHUB_OUTPUT
+          "release_version=$major.$minor.$patch" >> $env:GITHUB_OUTPUT
+          "assembly_version=$major.$minor.$patch.0" >> $env:GITHUB_OUTPUT
+
+      - name: Publish Windows binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts, dist | Out-Null
+          $releaseTag = "${{ steps.semver.outputs.next_tag }}"
+          $releaseVersion = "${{ steps.semver.outputs.release_version }}"
+          $assemblyVersion = "${{ steps.semver.outputs.assembly_version }}"
+          $prefix = "${{ inputs.artifact_name_prefix }}"
+          $runtimes = "${{ inputs.runtimes }}".Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+          foreach ($runtime in $runtimes) {
+            $outputDir = "artifacts/$runtime"
+            $archivePath = "dist/$prefix-$releaseTag-$runtime.zip"
+
+            if (Test-Path $outputDir) {
+              Remove-Item -Recurse -Force $outputDir
+            }
+            if (Test-Path $archivePath) {
+              Remove-Item -Force $archivePath
+            }
+
+            dotnet publish "${{ inputs.publish_project_path }}" `
+              --configuration Release `
+              --runtime $runtime `
+              --self-contained true `
+              --output $outputDir `
+              -p:Version="$releaseVersion" `
+              -p:InformationalVersion="$releaseVersion" `
+              -p:AssemblyVersion="$assemblyVersion" `
+              -p:FileVersion="$assemblyVersion"
+
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+
+            Compress-Archive -Path "$outputDir/*" -DestinationPath $archivePath
+          }
+
+      - name: Create and push release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${next_tag}"
+          git push origin "${next_tag}"
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="${{ steps.semver.outputs.previous_tag }}"
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+
+          {
+            echo "## ${next_tag}"
+            echo
+            echo "### Changes"
+          } > release-notes.md
+
+          if [ -n "${previous}" ]; then
+            git log --pretty=format:'- %h %s' "${previous}..HEAD" >> release-notes.md
+            echo >> release-notes.md
+            echo >> release-notes.md
+            echo "Compare: ${previous}...${next_tag}" >> release-notes.md
+          else
+            git log --pretty=format:'- %h %s' HEAD >> release-notes.md
+          fi
+
+          if [ ! -s release-notes.md ]; then
+            echo "Release notes generation failed: empty notes file" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.semver.outputs.next_tag }}
+          name: ${{ steps.semver.outputs.next_tag }}
+          body_path: release-notes.md
+          files: |
+            dist/*.zip
