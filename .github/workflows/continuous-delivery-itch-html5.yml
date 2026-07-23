@@ -1,0 +1,231 @@
+name: Continuous Delivery itch.io HTML5 Reusable
+
+on:
+  workflow_call:
+    inputs:
+      main_branch:
+        description: Branch that is allowed to deploy
+        required: false
+        type: string
+        default: main
+      node_version:
+        description: Node.js version used for tests
+        required: false
+        type: string
+        default: "24"
+      game_dir:
+        description: Directory containing index.html and the HTML5 game files
+        required: false
+        type: string
+        default: game
+      test_command:
+        description: Command used to validate the game before deploy
+        required: false
+        type: string
+        default: npm test
+      version_file:
+        description: JSON file with integer major and minor fields
+        required: false
+        type: string
+        default: version.json
+      artifact_name_prefix:
+        description: Prefix for the release zip artifact
+        required: true
+        type: string
+      itch_target:
+        description: Butler target in user/game:channel format
+        required: true
+        type: string
+    secrets:
+      BUTLER_API_KEY:
+        description: itch.io API key used by butler
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install browser test runtime
+        run: npx playwright install chromium
+
+      - name: Run tests
+        run: ${{ inputs.test_command }}
+
+  deploy-release:
+    if: github.ref == format('refs/heads/{0}', inputs.main_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: quality
+    runs-on: ubuntu-latest
+    env:
+      BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+      ITCH_TARGET: ${{ inputs.itch_target }}
+
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install browser test runtime
+        run: npx playwright install chromium
+
+      - name: Run tests
+        run: ${{ inputs.test_command }}
+
+      - name: Compute next SemVer tag
+        id: semver
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_file="${{ inputs.version_file }}"
+          if [ ! -f "${version_file}" ]; then
+            echo "${version_file} is missing" >&2
+            exit 1
+          fi
+
+          major=$(jq -r '.major // empty' "${version_file}")
+          minor=$(jq -r '.minor // empty' "${version_file}")
+          if [ -z "${major}" ] || [ -z "${minor}" ]; then
+            echo "${version_file} must contain major and minor integers" >&2
+            exit 1
+          fi
+
+          git fetch --tags --force
+          latest=$(git tag -l "v${major}.${minor}.*" --sort=-v:refname | head -n 1 || true)
+          if [ -z "${latest}" ]; then
+            patch=0
+            previous=""
+          else
+            patch=$(( ${latest##*.} + 1 ))
+            previous="${latest}"
+          fi
+
+          next_tag="v${major}.${minor}.${patch}"
+          if git rev-parse "${next_tag}" >/dev/null 2>&1; then
+            echo "Tag already exists: ${next_tag}" >&2
+            exit 1
+          fi
+
+          echo "next_tag=${next_tag}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${previous}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+          echo "Computed next version: ${next_tag}"
+
+      - name: Validate HTML5 game directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          game_dir="${{ inputs.game_dir }}"
+          if [ ! -d "${game_dir}" ]; then
+            echo "Game directory does not exist: ${game_dir}" >&2
+            exit 1
+          fi
+          if [ ! -f "${game_dir}/index.html" ]; then
+            echo "HTML5 game directory must contain index.html: ${game_dir}" >&2
+            exit 1
+          fi
+
+      - name: Package HTML5 game artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          game_dir="${{ inputs.game_dir }}"
+          archive="release-assets/${{ inputs.artifact_name_prefix }}-${next_tag}.zip"
+          mkdir -p release-assets
+          rm -f "${archive}"
+          (cd "${game_dir}" && zip -r "../${archive}" .)
+          unzip -l "${archive}"
+
+      - name: Upload HTML5 game artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name_prefix }}-${{ steps.semver.outputs.next_tag }}
+          path: release-assets/${{ inputs.artifact_name_prefix }}-${{ steps.semver.outputs.next_tag }}.zip
+
+      - name: Install butler
+        run: |
+          curl -L https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default -o butler.zip
+          unzip -q butler.zip
+          chmod +x butler
+          ./butler -V
+
+      - name: Deploy HTML5 game to itch.io
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          ./butler push "${{ inputs.game_dir }}" "${ITCH_TARGET}" --userversion "${next_tag}"
+
+      - name: Create and push release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${next_tag}"
+          git push origin "${next_tag}"
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="${{ steps.semver.outputs.previous_tag }}"
+          next_tag="${{ steps.semver.outputs.next_tag }}"
+          {
+            echo "## ${next_tag}"
+            echo
+            echo "Published to itch.io channel: \`${ITCH_TARGET}\`"
+            echo
+            echo "### Changes"
+          } > release-notes.md
+
+          if [ -n "${previous}" ]; then
+            git log --pretty=format:'- %h %s' "${previous}..HEAD" >> release-notes.md
+            echo >> release-notes.md
+            echo >> release-notes.md
+            echo "Compare: ${previous}...${next_tag}" >> release-notes.md
+          else
+            git log --pretty=format:'- %h %s' HEAD >> release-notes.md
+          fi
+
+          if [ ! -s release-notes.md ]; then
+            echo "Release notes generation failed: empty notes file" >&2
+            exit 1
+          fi
+
+          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.semver.outputs.next_tag }}
+          name: ${{ steps.semver.outputs.next_tag }}
+          body_path: release-notes.md
+          files: |
+            release-assets/*.zip
