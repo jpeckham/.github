@@ -5,6 +5,7 @@ $destination = Join-Path $env:RUNNER_TEMP 'godot-toolchain'
 New-Item -ItemType Directory -Force $destination | Out-Null
 $base = "https://github.com/godotengine/godot-builds/releases/download/$Version-stable"
 $sums = (Invoke-WebRequest "$base/SHA512-SUMS.txt").Content
+if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
 $engine = "Godot_v$Version-stable_win64.exe.zip"
 $templates = "Godot_v$Version-stable_export_templates.tpz"
 foreach ($asset in @($engine, $templates)) {
