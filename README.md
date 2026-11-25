@@ -36,6 +36,10 @@ jobs:
 ```
 
 Use the same tested commit for the workflow reference and `library_ref`.
+Optional `additional_release_artifact` adds files from another artifact in the
+same workflow run, such as an optional companion service source archive. Produce
+that artifact in a job that the caller's MSI job `needs`; a missing requested
+artifact fails the release. Leave it empty for a standalone Godot game.
 Provide a `Windows Desktop` export preset, or set `export_preset`.
 Optional `project_path`, `test_script`, and `manufacturer` customize the project.
 The SceneTree test script must exit nonzero on failures and print

@@ -42,6 +42,10 @@ on:
       publish_release:
         type: boolean
         default: false
+      additional_release_artifact:
+        description: Optional artifact of additional release files, produced before the caller job
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -165,9 +169,22 @@ jobs:
         with:
           name: ${{ inputs.artifact_prefix }}-windows-msi
           path: dist
+      - name: Download optional companion release files
+        if: inputs.additional_release_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.additional_release_artifact }}
+          path: extras
       - name: Publish verified release assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "$RELEASE_TAG"
+        run: |
+          shopt -s nullglob
+          candidates=(dist/* extras/*)
+          assets=()
+          for file in "${candidates[@]}"; do
+            if [[ -f "$file" ]]; then assets+=("$file"); fi
+          done
+          gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes --title "$RELEASE_TAG"
