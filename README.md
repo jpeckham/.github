@@ -41,6 +41,12 @@ Optional `project_path`, `test_script`, and `manufacturer` customize the project
 The SceneTree test script must exit nonzero on failures and print
 `RESULT: N checks, 0 failures` on success (N must be positive).
 The standard GDScript engine is supported; C# projects need additional tooling.
+The MSI includes the matching Godot engine MIT license and full upstream
+dependency copyright/license file. Put project-specific redistribution notices
+in `licenses/`, or set `license_directory` relative to `project_path`. They are
+copied beside the game under `licenses/`. Release assets also include a SHA256
+inventory of the exact installed payload. Audit additional assets/plugins and
+their licenses for each project.
 
 Branch/PR runs upload development MSI artifacts (`0.0.<run-number>`).
 Only a successful `vMAJOR.MINOR.PATCH` tag build can publish a GitHub Release;

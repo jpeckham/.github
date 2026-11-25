@@ -25,6 +25,10 @@ on:
       manufacturer:
         type: string
         default: jpeckham
+      license_directory:
+        description: Project-relative directory of additional redistribution notices
+        type: string
+        default: licenses
       executable:
         type: string
         required: true
@@ -60,6 +64,8 @@ jobs:
       EXECUTABLE: ${{ inputs.executable }}
       UPGRADE_CODE: ${{ inputs.upgrade_code }}
       PREFIX: ${{ inputs.artifact_prefix }}
+      GODOT_VERSION: ${{ inputs.godot_version }}
+      LICENSE_DIRECTORY: ${{ inputs.license_directory }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -109,6 +115,7 @@ jobs:
           $export = Join-Path $env:GITHUB_WORKSPACE "build/payload/$env:EXECUTABLE"
           Invoke-Godot 'export' @('--headless','--path',"`"$projectPath`"",'--export-release',"`"$env:EXPORT_PRESET`"", "`"$export`"")
           if (-not (Test-Path -LiteralPath $export)) { throw 'Export output missing.' }
+          ./.godot-release-library/scripts/godot/Add-Notices.ps1 -GodotVersion $env:GODOT_VERSION -Payload build/payload -ProjectNotices (Join-Path $projectPath $env:LICENSE_DIRECTORY)
           # Smoke the actual exported game only on the hosted runner, never on an owner's PC.
           $smoke = Start-Process -FilePath $export -ArgumentList @('--headless','--quit-after','10') -WindowStyle Hidden -RedirectStandardOutput build/logs/export-smoke-stdout.txt -RedirectStandardError build/logs/export-smoke-stderr.txt -PassThru
           if (-not $smoke.WaitForExit(30000)) { $smoke.Kill($true); throw 'Export smoke timed out.' }
@@ -119,6 +126,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           dotnet tool install --global wix --version 4.0.6
           if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
+          $payloadRoot = (Resolve-Path build/payload).Path
+          Get-ChildItem -LiteralPath $payloadRoot -Recurse -File | Sort-Object FullName | ForEach-Object {
+            "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $([IO.Path]::GetRelativePath($payloadRoot,$_.FullName).Replace('\','/'))"
+          } | Set-Content dist/PAYLOAD-SHA256SUMS.txt -Encoding utf8
           $msi = "dist/$env:PREFIX-$env:VERSION-win-x64.msi"
           ./.godot-release-library/scripts/godot/Build-Msi.ps1 -Payload build/payload -ProductName $env:PRODUCT_NAME -Manufacturer $env:MANUFACTURER -Executable $env:EXECUTABLE -UpgradeCode $env:UPGRADE_CODE -Version $env:VERSION -Output $msi
           ./.godot-release-library/scripts/godot/Test-Msi.ps1 -Msi $msi -Payload build/payload -LogDirectory build/logs
@@ -139,6 +150,7 @@ jobs:
           path: |
             dist/*.msi
             dist/SHA256SUMS.txt
+            dist/PAYLOAD-SHA256SUMS.txt
           if-no-files-found: error
 
   release:
