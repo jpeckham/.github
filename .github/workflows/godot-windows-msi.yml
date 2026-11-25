@@ -1,0 +1,158 @@
+name: Godot Windows MSI reusable
+
+on:
+  workflow_call:
+    inputs:
+      library_ref:
+        description: Commit of jpeckham/.github containing the companion scripts
+        type: string
+        required: true
+      godot_version:
+        type: string
+        default: '4.4.1'
+      project_path:
+        type: string
+        default: '.'
+      test_script:
+        type: string
+        default: tests/run_all.gd
+      export_preset:
+        type: string
+        default: Windows Desktop
+      product_name:
+        type: string
+        required: true
+      manufacturer:
+        type: string
+        default: jpeckham
+      executable:
+        type: string
+        required: true
+      artifact_prefix:
+        type: string
+        required: true
+      upgrade_code:
+        description: Stable product GUID, unique to each game
+        type: string
+        required: true
+      publish_release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      PROJECT: ${{ inputs.project_path }}
+      TEST_SCRIPT: ${{ inputs.test_script }}
+      EXPORT_PRESET: ${{ inputs.export_preset }}
+      PRODUCT_NAME: ${{ inputs.product_name }}
+      MANUFACTURER: ${{ inputs.manufacturer }}
+      EXECUTABLE: ${{ inputs.executable }}
+      UPGRADE_CODE: ${{ inputs.upgrade_code }}
+      PREFIX: ${{ inputs.artifact_prefix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jpeckham/.github
+          ref: ${{ inputs.library_ref }}
+          path: .godot-release-library
+          persist-credentials: false
+      - name: Select installer version
+        id: version
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -match '^refs/tags/v(\d+\.\d+\.\d+)$') {
+            $version = $Matches[1]
+          } elseif ($env:GITHUB_REF -like 'refs/tags/*') {
+            throw 'Release tags must be vMAJOR.MINOR.PATCH.'
+          } else {
+            $version = "0.0.$env:GITHUB_RUN_NUMBER"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "VERSION=$version" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force build/payload, build/logs, dist | Out-Null
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install official Godot and export templates
+        env:
+          GODOT_VERSION: ${{ inputs.godot_version }}
+        run: ./.godot-release-library/scripts/godot/Install-Godot.ps1 -Version $env:GODOT_VERSION
+      - name: Import, test and export with bounded processes
+        timeout-minutes: 6
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-Godot([string]$Name, [string[]]$Arguments) {
+            $stdout = Join-Path $env:GITHUB_WORKSPACE "build/logs/$Name-stdout.txt"
+            $stderr = Join-Path $env:GITHUB_WORKSPACE "build/logs/$Name-stderr.txt"
+            $process = Start-Process -FilePath $env:GODOT -ArgumentList $Arguments -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+            if (-not $process.WaitForExit(90000)) { $process.Kill($true); throw "$Name timed out" }
+            Get-Content $stdout, $stderr
+            if ($process.ExitCode -ne 0) { throw "$Name failed: $($process.ExitCode)" }
+            if (Select-String -Path $stdout,$stderr -Pattern 'SCRIPT ERROR:|Parse Error:|ERROR:') { throw "$Name reported engine errors" }
+          }
+          $projectPath = (Resolve-Path -LiteralPath $env:PROJECT).Path
+          Invoke-Godot 'import' @('--headless','--path',"`"$projectPath`"",'--editor','--quit')
+          Invoke-Godot 'tests' @('--headless','--path',"`"$projectPath`"",'--script',"`"$env:TEST_SCRIPT`"")
+          if (-not (Select-String -Path build/logs/tests-stdout.txt -Pattern '^RESULT: [1-9][0-9]* checks, 0 failures$' -Quiet)) { throw 'Test harness did not report nonzero checks and zero failures.' }
+          $export = Join-Path $env:GITHUB_WORKSPACE "build/payload/$env:EXECUTABLE"
+          Invoke-Godot 'export' @('--headless','--path',"`"$projectPath`"",'--export-release',"`"$env:EXPORT_PRESET`"", "`"$export`"")
+          if (-not (Test-Path -LiteralPath $export)) { throw 'Export output missing.' }
+          # Smoke the actual exported game only on the hosted runner, never on an owner's PC.
+          $smoke = Start-Process -FilePath $export -ArgumentList @('--headless','--quit-after','10') -WindowStyle Hidden -RedirectStandardOutput build/logs/export-smoke-stdout.txt -RedirectStandardError build/logs/export-smoke-stderr.txt -PassThru
+          if (-not $smoke.WaitForExit(30000)) { $smoke.Kill($true); throw 'Export smoke timed out.' }
+          if ($smoke.ExitCode -ne 0 -or (Select-String -Path build/logs/export-smoke-*.txt -Pattern 'SCRIPT ERROR:|Parse Error:|ERROR:')) { throw 'Exported game startup failed.' }
+      - name: Build and verify MSI on hosted Windows
+        timeout-minutes: 6
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet tool install --global wix --version 4.0.6
+          if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
+          $msi = "dist/$env:PREFIX-$env:VERSION-win-x64.msi"
+          ./.godot-release-library/scripts/godot/Build-Msi.ps1 -Payload build/payload -ProductName $env:PRODUCT_NAME -Manufacturer $env:MANUFACTURER -Executable $env:EXECUTABLE -UpgradeCode $env:UPGRADE_CODE -Version $env:VERSION -Output $msi
+          ./.godot-release-library/scripts/godot/Test-Msi.ps1 -Msi $msi -Payload build/payload -LogDirectory build/logs
+          $hash = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($msi))" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-validation-logs
+          path: build/logs/
+          if-no-files-found: warn
+      - name: Upload verified installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_prefix }}-windows-msi
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: inputs.publish_release && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_prefix }}-windows-msi
+          path: dist
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "$RELEASE_TAG"

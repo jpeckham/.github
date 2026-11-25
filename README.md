@@ -4,6 +4,57 @@ My .github repo for all my tools.
 
 ## Reusable Workflows
 
+### Godot Windows MSI releases
+
+[`godot-windows-msi.yml`](.github/workflows/godot-windows-msi.yml) builds a standard
+GDScript Godot 4 game on disposable GitHub-hosted Windows runners. It downloads
+the official engine and export templates, verifies their SHA512 checksums,
+runs the project's headless test harness, exports and smoke-tests the executable,
+builds an x64 MSI with WiX 4.0.6, verifies installed payload hashes and uninstalls.
+Validation logs are retained even on failure. No software runs on your desktop.
+
+```yaml
+name: Build game
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: write
+jobs:
+  windows:
+    uses: jpeckham/.github/.github/workflows/godot-windows-msi.yml@<COMMIT>
+    with:
+      library_ref: <SAME-COMMIT>
+      godot_version: '4.4.1'
+      product_name: My Godot Game
+      executable: MyGame.exe
+      artifact_prefix: my-game
+      upgrade_code: '<GENERATE-A-UNIQUE-GUID-ONCE>'
+      publish_release: true
+```
+
+Use the same tested commit for the workflow reference and `library_ref`.
+Provide a `Windows Desktop` export preset, or set `export_preset`.
+Optional `project_path`, `test_script`, and `manufacturer` customize the project.
+The SceneTree test script must exit nonzero on failures and print
+`RESULT: N checks, 0 failures` on success (N must be positive).
+The standard GDScript engine is supported; C# projects need additional tooling.
+
+Branch/PR runs upload development MSI artifacts (`0.0.<run-number>`).
+Only a successful `vMAJOR.MINOR.PATCH` tag build can publish a GitHub Release;
+set `publish_release: false` to disable publishing. MSI limits are major/minor
+0–255 and patch 0–65535. Keep the upgrade GUID and product name stable across
+versions and choose a different GUID for every game. A new installer removes
+older versions and rejects downgrades. Saves outside the installation directory
+are not part of the installer. Packages currently require administrator rights
+and are unsigned; code signing requires separate certificate configuration.
+
+MSI creation uses the [official WiX CLI](https://docs.firegiant.com/wix/using-wix/).
+Install/remove checks run only on hosted runners. Visible playthroughs, hardware
+operation, upgrade-path validation and code signing remain separate release gates.
+
 ### itch.io HTML5 Continuous Delivery
 
 Use `.github/workflows/continuous-delivery-itch-html5.yml` from another game
