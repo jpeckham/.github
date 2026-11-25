@@ -52,8 +52,13 @@ are not part of the installer. Packages currently require administrator rights
 and are unsigned; code signing requires separate certificate configuration.
 
 MSI creation uses the [official WiX CLI](https://docs.firegiant.com/wix/using-wix/).
-Install/remove checks run only on hosted runners. Visible playthroughs, hardware
-operation, upgrade-path validation and code signing remain separate release gates.
+Install/remove and major-upgrade checks run only on hosted runners. The upgrade
+fixture installs version 0.0.0, upgrades to the candidate, verifies every payload
+hash and removal of an obsolete file, rejects a downgrade, then uninstalls.
+Candidate versions must be greater than 0.0.0. This covers the major-upgrade
+mechanism; testing migration from a particular published release is separate.
+Visible playthroughs, hardware operation, rollback after an interrupted install,
+and code signing remain separate release gates.
 
 ### itch.io HTML5 Continuous Delivery
 

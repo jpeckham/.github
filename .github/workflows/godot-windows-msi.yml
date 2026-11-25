@@ -122,6 +122,7 @@ jobs:
           $msi = "dist/$env:PREFIX-$env:VERSION-win-x64.msi"
           ./.godot-release-library/scripts/godot/Build-Msi.ps1 -Payload build/payload -ProductName $env:PRODUCT_NAME -Manufacturer $env:MANUFACTURER -Executable $env:EXECUTABLE -UpgradeCode $env:UPGRADE_CODE -Version $env:VERSION -Output $msi
           ./.godot-release-library/scripts/godot/Test-Msi.ps1 -Msi $msi -Payload build/payload -LogDirectory build/logs
+          ./.godot-release-library/scripts/godot/Test-MsiUpgrade.ps1 -Msi $msi -Payload build/payload -ProductName $env:PRODUCT_NAME -Manufacturer $env:MANUFACTURER -Executable $env:EXECUTABLE -UpgradeCode $env:UPGRADE_CODE -Version $env:VERSION -LogDirectory build/logs
           $hash = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $([IO.Path]::GetFileName($msi))" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
       - name: Preserve validation logs
@@ -135,7 +136,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_prefix }}-windows-msi
-          path: dist/*
+          path: |
+            dist/*.msi
+            dist/SHA256SUMS.txt
           if-no-files-found: error
 
   release:
